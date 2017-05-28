@@ -57,8 +57,7 @@ showDerivation tree = do
           showDerivation' ((cat, op) :^ children) lwidth = do
               rwidth <- foldM (\lw child -> do
                      rw <- showDerivation' child lw; return $ max lw rw) lwidth children
-              let 
-                  pad = (rwidth - lwidth - (length $ show cat)) `div` 2 + lwidth
+              let pad = (rwidth - lwidth - (length $ show cat)) `div` 2 + lwidth
               putStrLn $ whiteSpace lwidth ++ repeatChar (rwidth - lwidth) '-' ++ show op
               putStrLn $ whiteSpace pad ++ show cat
               return rwidth
@@ -111,26 +110,31 @@ parse nBest seenRules unaryRules input
             joinCell a b = M.unionsWith maxByScore [a, b]
 
             terminalCell :: (String, [(Cat, Float)]) -> Cell
-            terminalCell (term, supertags) =
-                     M.fromList [ (cat, treesFor cat score) | (cat, score) <- supertags ]
-                where treesFor cat score = ((cat, Intro):^[Leaf term], score)
+            terminalCell (term, supertags) = M.fromList $ do
+                        (c, score) <- supertags
+                        let preterminal = (c, Intro):^[Leaf term]
+                        case M.lookup c unaryRules of
+                            Just c' -> let unaryTree = (c', Unary):^[preterminal]
+                                           score' = score - 0.1
+                                       in [(c, (preterminal, score)), (c', (unaryTree, score'))]
+                            Nothing -> return $ (c, (preterminal, score))
 
             binProduct :: Cell -> Cell -> Cell
             binProduct acell bcell = M.unionsWith maxByScore $ do
-                                (a, (atree, ascore)) <- M.toList acell
-                                (b, (btree, bscore)) <- M.toList bcell
-                                guard $ (a, b) `isSeen` seenRules
-                                (op, c) <- applyRules a b
-                                let (_, aOp) :^ _ = atree
-                                    (_, bOp) :^ _ = btree
-                                    res   = (c, op):^[atree, btree]
-                                    score = ascore + bscore
-                                guard $ isNormalForm op aOp bOp a b
-                                case M.lookup c unaryRules of
-                                    Just c' -> let res' = (c', Unary):^[res]
-                                                   score' = score - 0.1  -- unary penalty
-                                        in return $ M.fromList [(c, (res, score)), (c', (res', score'))]
-                                    Nothing -> return $ M.singleton c (res, score)
+                        (a, (atree, ascore)) <- M.toList acell
+                        (b, (btree, bscore)) <- M.toList bcell
+                        guard $ (a, b) `isSeen` seenRules
+                        (op, c) <- applyRules a b
+                        let (_, aOp) :^ _ = atree
+                            (_, bOp) :^ _ = btree
+                            res   = (c, op):^[atree, btree]
+                            score = ascore + bscore
+                        -- guard $ isNormalForm op aOp bOp a b
+                        case M.lookup c unaryRules of
+                            Just c' -> let res' = (c', Unary):^[res]
+                                           score' = score - 0.1  -- unary penalty
+                                in return $ M.fromList [(c, (res, score)), (c', (res', score'))]
+                            Nothing -> return $ M.singleton c (res, score)
 
             maxByScore a@(_, s1) b@(_, s2) = if s1 >= s2 then a else b
 
