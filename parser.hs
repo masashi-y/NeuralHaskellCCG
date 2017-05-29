@@ -4,7 +4,7 @@ import Data.Maybe
 import Supertag
 import CCG            hiding (parse)
 import Data.List      (maximumBy)
-import Control.Monad  (guard, forM_, foldM)
+import Control.Monad  (guard, forM_, foldM, when)
 import GHC.Exts       ( sortWith )
 import Data.Maybe
 import System.FilePath
@@ -116,11 +116,7 @@ parse nBest seenRules unaryRules input depMat
             terminalCell (index, term, supertags) = M.fromList $ do
                         (c, score) <- supertags
                         let preterminal = (c, Intro, index):^[Leaf term]
-                        case M.lookup c unaryRules of
-                            Just c' -> let unaryTree = (c', Unary, index):^[preterminal]
-                                           score' = score - 0.1
-                                       in [(c, (preterminal, score)), (c', (unaryTree, score'))]
-                            Nothing -> return $ (c, (preterminal, score))
+                        (c, (preterminal, score)):unaryTrees preterminal (score - 0.1)
 
             binProduct :: Cell -> Cell -> Cell
             binProduct acell bcell = M.unionsWith maxByScore $ do
@@ -130,16 +126,13 @@ parse nBest seenRules unaryRules input depMat
                         (op, c) <- applyRules a b
                         let (_, aOp, aIndex) :^ _ = atree
                             (_, bOp, bIndex) :^ _ = btree
-                            res   = (c, op, aIndex):^[atree, btree]
-                            depScore = depMat U.! (bIndex, aIndex)
-                            score = ascore + bscore + depScore
+                            parse = (c, op, aIndex):^[atree, btree]
+                            score = ascore + bscore + (depMat U.! (bIndex, aIndex))
                         -- guard $ isNormalForm op aOp bOp a b
-                        case M.lookup c unaryRules of
-                            Just c' -> let res' = (c', Unary, aIndex):^[res]
-                                           score' = score + depScore - 0.1  -- unary penalty
-                                in return $ M.fromList [(c, (res, score)), (c', (res', score'))]
-                            Nothing -> return $ M.singleton c (res, score)
+                        return $ M.fromList $ (c, (parse, score)):unaryTrees parse (score - 0.1)
 
+            unaryTrees child@((cat, _, index):^_) score = [(c', (parse, score)) | c' <- (unaryRules ?? cat),
+                                                        let parse = (c', Unary, index):^[child]]
             maxByScore a@(_, s1) b@(_, s2) = if s1 >= s2 then a else b
 
 
@@ -171,17 +164,18 @@ main :: IO ()
 main = do
     (modelPath:_) <- getArgs
     isValidModelDir <- doesDirectoryExist modelPath
-    if not isValidModelDir then
-        error $ "Model not found: " ++ modelPath else return ()
+    when (not isValidModelDir) $
+        fail $ "Model not found: " ++ modelPath
     let targetPath    = modelPath </> "target.txt"
         seenRulePath  = modelPath </> "seen_rules.txt"
         unaryRulePath = modelPath </> "unary_rules.txt"
-    input <- getLine
+    sents <- lines <$> getContents
     supertags <- readCatList targetPath
     seenRules <- readSeenRules seenRulePath
     unaryRules <- readUnaryRules unaryRulePath
-    ((lex, depMat):_) <- assignCatsAndDeps modelPath 30 supertags [input]
-    let [(res, score)] = parse 1 seenRules unaryRules lex depMat
-    showDerivation $ res
-    putStrLn $ "Probability: " ++ (show $ exp score)
-
+    taggedSents <- assignCatsAndDeps modelPath 20 supertags sents
+    let parse' = parse 1 seenRules unaryRules
+        res = map (uncurry parse') taggedSents
+    forM_ res $ \[(res, score)] -> do
+        showDerivation res
+        putStrLn $ "Probability: " ++ (show $ exp score)

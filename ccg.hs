@@ -205,10 +205,11 @@ dropBrackets input = if ("(" `isPrefixOf` input) &&
 
 parse :: String -> Cat
 parse input = case cat' $ dropBrackets input of
-                [(c, rest@(_:_))] -> error $ "Failed to parse: " ++ input ++ " " ++ rest
+                [(c, (_:_))] -> parseFailure
                 [(c, _)] -> c
-                _ -> error $ "Failed to parse: " ++ input
+                _ -> parseFailure
     where CatParser cat' = cat
+          parseFailure =  error $ "Failed to parse: " ++ input
 
 parseMaybe :: String -> Maybe Cat
 parseMaybe input = case cat' $ dropBrackets input of
@@ -308,7 +309,7 @@ applyRules a b = do
 -- ##########################################################################
 
 type SeenRules = S.Set (Cat, Cat)
-type UnaryRules = M.Map Cat Cat
+type UnaryRules = M.Map Cat [Cat]
 
 isSeen :: (Cat, Cat) -> SeenRules -> Bool
 isSeen (c1, c2) = S.member (removeFeat c1, removeFeat c2)
@@ -338,8 +339,8 @@ readUnaryRules :: String -> IO UnaryRules
 readUnaryRules fileName = do
     items <- fmap lines $ readFile fileName
     let filtered = filter (not . isComment) items
-    return $ M.fromList $
-        map (\item -> let (a:b:_) = words item in (parse a, parse b)) filtered
+    return $ M.fromListWith (++) $
+        map (\item -> let (a:b:_) = words item in (parse a, [parse b])) filtered
 
 main = do
     let input = "NP/NP"
@@ -349,4 +350,6 @@ main = do
     print $ parse "NP[nb]/N"
     print $ parse "(NP[nb]/N)"
     res <- readCatList "/Users/masashi-y/depccg/models/tri_headfirst/target.txt"
+    u <- readUnaryRules "/Users/masashi-y/depccg/models/tri_headfirst/unary_rules.txt"
+    print u
     return ()
