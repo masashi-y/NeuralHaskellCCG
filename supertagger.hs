@@ -1,7 +1,9 @@
 
 module Supertag (
     Lexicon,
+    DependencyMatrix,
     assignSupertags,
+    assignCatsAndDeps,
     ) where
 
 import Control.Exception     ( bracket )
@@ -15,17 +17,19 @@ import System.Posix.Env      ( putEnv )
 import CCG
 import Control.Monad         ( forM )
 import GHC.Exts              ( sortWith )
+import Data.Array.Unboxed    ( array, UArray )
 
 foreign import ccall "tag_and_parse_doc" cTagAndParseDoc :: CString -> Ptr CString -> Ptr CInt -> CInt -> Ptr (Ptr CFloat) -> Ptr (Ptr CFloat) -> IO ()
 foreign import ccall "tag" cTag :: Ptr CChar -> Ptr CChar -> CInt -> Ptr CFloat -> IO ()
 foreign import ccall "Py_Initialize" cPyInitialize :: IO ()
 foreign import ccall "initchainer_tagger" cInitChainerTagger :: IO ()
 
-type Lexicon = [(String, [(Cat, Float)])]
+type Lexicon = [(Int, String, [(Cat, Float)])]
+type DependencyMatrix = UArray (Int, Int) Float
 
 assignSupertags :: String -> Int -> [Cat] -> String -> IO Lexicon
 assignSupertags modelPath beam superTags sent = do
-    let tagSize = 425  --TODO
+    let tagSize = length superTags
         len = length $ words sent
     cPath <- newCString modelPath
     cSent <- newCString sent
@@ -39,13 +43,13 @@ assignSupertags modelPath beam superTags sent = do
         probs <- peekArray tagSize mat'
         let probs' = map realToFrac probs
             bestTags = take beam $ sortWith (negate . snd) $ zip superTags probs'
-        return (word, bestTags)
+        return (i+1, word, bestTags)
     return res
 
 
--- assignCatsAndDeps :: String -> Int -> [Cat] -> [String] -> IO Lexicon
+assignCatsAndDeps :: String -> Int -> [Cat] -> [String] -> IO [(Lexicon, DependencyMatrix)]
 assignCatsAndDeps modelPath beam superTags sents = do
-    let tagSize = 425  --TODO
+    let tagSize = length superTags
         nSents = length sents
         lengths = map (length . words) sents
     cPath <- newCString modelPath
@@ -66,16 +70,16 @@ assignCatsAndDeps modelPath beam superTags sents = do
     cTagAndParseDoc cPath cSents cLengths (fromIntegral nSents) cTags cDeps
     forM (zip3 sents cTagsList cDepsList) $ \(sent, tagMat, depMat) -> do
         let tokens = words sent
-        let sLen = length tokens
+            sLen = length tokens
+            constructArray = array ((1, 0), (sLen+1, sLen+1))
         res <- forM (zip [0..] tokens) $ \(i, word) -> do
-            let tagMat' = advancePtr tagMat (i * tagSize)
-                depMat' = advancePtr depMat (i * (sLen + 1))
-            tagVec <- peekArray tagSize tagMat'
-            depVec <- peekArray (sLen + 1) depMat'
+            tagVec <- peekArray tagSize $ advancePtr tagMat (i * tagSize)
             let tagScores = take beam $ sortWith (negate . snd) $ zip superTags $ map realToFrac tagVec
-                depScores = map realToFrac depVec
-            return (i+1, word, tagScores, depScores)
-        return res
+            return (i+1, word, tagScores)
+        depMat' <- fmap (constructArray . concat) $ forM [0..sLen] $ \i -> do
+            depVec <- peekArray (sLen + 1) $ advancePtr depMat (i * (sLen + 1))
+            return $ zip [(i+1, j) | j <- [0..]] $ map realToFrac depVec
+        return (res, depMat')
 
 
 main :: IO ()

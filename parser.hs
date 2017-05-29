@@ -11,13 +11,16 @@ import System.FilePath
 import System.Directory   (doesDirectoryExist)
 import System.Environment (getArgs)
 import Text.Printf
+import qualified Data.Array.Unboxed as U
 
-data ParseTree = Leaf String | (Cat, Combinator) :^ [ParseTree]
+type HeadIndex = Int
+data ParseTree = Leaf String
+               | (Cat, Combinator, HeadIndex) :^ [ParseTree]
              deriving (Eq, Ord)
 
 instance Show ParseTree where
     show (Leaf a)          = show a
-    show ((c, _) :^ trees) = show c ++ "^" ++ show trees
+    show ((c, _, _) :^ trees) = show c ++ "^" ++ show trees
 
 terminals :: ParseTree -> [String]
 terminals (Leaf s) = [s]
@@ -25,7 +28,7 @@ terminals (_ :^ children) = concat $ map terminals children
 
 preterminals :: ParseTree -> [Cat]
 preterminals (Leaf _) = []
-preterminals ((cat, _) :^ [Leaf _]) = [cat]
+preterminals ((cat, _, _) :^ [Leaf _]) = [cat]
 preterminals (_ :^ children) = concat $ map preterminals children
 
 -- ##########################################################################
@@ -52,9 +55,9 @@ showDerivation tree = do
                   wordS' = wordS ++ (whiteSpace lwordlen) ++ word ++ (whiteSpace rwordlen)
 
           showDerivation' :: ParseTree -> Int -> IO Int
-          showDerivation' ((cat, _) :^ [Leaf word]) lwidth = return $
+          showDerivation' ((cat, _, _) :^ [Leaf word]) lwidth = return $
                max lwidth (2 + lwidth + max (length $ show cat) (length word))
-          showDerivation' ((cat, op) :^ children) lwidth = do
+          showDerivation' ((cat, op, _) :^ children) lwidth = do
               rwidth <- foldM (\lw child -> do
                      rw <- showDerivation' child lw; return $ max lw rw) lwidth children
               let pad = (rwidth - lwidth - (length $ show cat)) `div` 2 + lwidth
@@ -75,15 +78,15 @@ type Vector = [(Int, Cell)]
 (??) :: Ord s => M.Map s [a] -> s -> [a]
 m ?? s = fromMaybe [] (M.lookup s m)
 
-parse :: Int -> SeenRules -> UnaryRules -> Lexicon -> [(ParseTree, Float)]
-parse nBest seenRules unaryRules input
+parse :: Int -> SeenRules -> UnaryRules -> Lexicon -> DependencyMatrix -> [(ParseTree, Float)]
+parse nBest seenRules unaryRules input depMat
     | size == ncell = take nBest $ sortWith (negate . snd) $ filter (isPossibleRoot . fst) $ M.elems cell
     | otherwise     = []
       where (size, vectors) = foldl nextInputToken (0, []) input
             (ncell, cell) = last (last vectors)
-            isPossibleRoot ((cat, _) :^ _) = cat `elem` [S "dcl", S "wq", S "q", S "qem", NP ""]
+            isPossibleRoot ((cat, _, _) :^ _) = cat `elem` [S "dcl", S "wq", S "q", S "qem", NP ""]
 
-            nextInputToken :: (Int, [Vector]) -> (String, [(Cat, Float)]) -> (Int, [Vector])
+            nextInputToken :: (Int, [Vector]) -> (Int, String, [(Cat, Float)]) -> (Int, [Vector])
             nextInputToken (size, vectors) token = (size', vectors')
               where size'    = size + 1
                     vectors' = [(size', cell)] : updateVectors vectors [(size, cell)] size size'
@@ -109,12 +112,12 @@ parse nBest seenRules unaryRules input
             joinCell :: Cell -> Cell -> Cell
             joinCell a b = M.unionsWith maxByScore [a, b]
 
-            terminalCell :: (String, [(Cat, Float)]) -> Cell
-            terminalCell (term, supertags) = M.fromList $ do
+            terminalCell :: (Int, String, [(Cat, Float)]) -> Cell
+            terminalCell (index, term, supertags) = M.fromList $ do
                         (c, score) <- supertags
-                        let preterminal = (c, Intro):^[Leaf term]
+                        let preterminal = (c, Intro, index):^[Leaf term]
                         case M.lookup c unaryRules of
-                            Just c' -> let unaryTree = (c', Unary):^[preterminal]
+                            Just c' -> let unaryTree = (c', Unary, index):^[preterminal]
                                            score' = score - 0.1
                                        in [(c, (preterminal, score)), (c', (unaryTree, score'))]
                             Nothing -> return $ (c, (preterminal, score))
@@ -125,14 +128,15 @@ parse nBest seenRules unaryRules input
                         (b, (btree, bscore)) <- M.toList bcell
                         guard $ (a, b) `isSeen` seenRules
                         (op, c) <- applyRules a b
-                        let (_, aOp) :^ _ = atree
-                            (_, bOp) :^ _ = btree
-                            res   = (c, op):^[atree, btree]
-                            score = ascore + bscore
+                        let (_, aOp, aIndex) :^ _ = atree
+                            (_, bOp, bIndex) :^ _ = btree
+                            res   = (c, op, aIndex):^[atree, btree]
+                            depScore = depMat U.! (bIndex, aIndex)
+                            score = ascore + bscore + depScore
                         -- guard $ isNormalForm op aOp bOp a b
                         case M.lookup c unaryRules of
-                            Just c' -> let res' = (c', Unary):^[res]
-                                           score' = score - 0.1  -- unary penalty
+                            Just c' -> let res' = (c', Unary, aIndex):^[res]
+                                           score' = score + depScore - 0.1  -- unary penalty
                                 in return $ M.fromList [(c, (res, score)), (c', (res', score'))]
                             Nothing -> return $ M.singleton c (res, score)
 
@@ -159,7 +163,7 @@ isNormalForm op leftOp rightOp leftCat rightCat
 
 showOneBestTags :: Lexicon -> IO ()
 showOneBestTags lexicon = do
-    forM_ lexicon $ \(word, supertags) -> do
+    forM_ lexicon $ \(_, word, supertags) -> do
         let cats = unwords $ map (\(a, b) -> printf "%s -> %4.3f" (show a) b) $ take 5 $ supertags
         putStrLn $ word ++ "\t-->\t" ++ cats
 
@@ -176,9 +180,8 @@ main = do
     supertags <- readCatList targetPath
     seenRules <- readSeenRules seenRulePath
     unaryRules <- readUnaryRules unaryRulePath
-    probs <- assignSupertags modelPath 30 supertags input
-    showOneBestTags probs
-    let [(res, score)] = parse 1 seenRules unaryRules probs
+    ((lex, depMat):_) <- assignCatsAndDeps modelPath 30 supertags [input]
+    let [(res, score)] = parse 1 seenRules unaryRules lex depMat
     showDerivation $ res
     putStrLn $ "Probability: " ++ (show $ exp score)
 
